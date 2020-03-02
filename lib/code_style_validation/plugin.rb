@@ -40,20 +40,8 @@ module Danger
       file_extensions = [*config[:file_extensions]]
       ignore_file_patterns = [*config[:ignore_file_patterns]]
 
-      diff = ''
-      case danger.scm_provider
-      when :github
-        diff = github.pr_diff
-      when :gitlab
-        diff = gitlab.mr_diff
-      when :bitbucket_server
-        diff = bitbucket_server.pr_diff
-      else
-        raise 'Unknown SCM Provider'
-      end
-
-      changes = get_changes(diff, file_extensions, ignore_file_patterns)
-      offending_files, patches = resolve_changes(validator, changes)
+      diff = git.added_files.concat git.modified_files
+      offending_files, patches = resolve_changes(validator, diff)
 
       message = ''
       unless offending_files.empty?
@@ -76,77 +64,6 @@ module Danger
 
     private
 
-    def get_changes(diff_str, file_extensions, ignore_file_patterns)
-      changes = {}
-      line_cursor = 0
-
-      patches = parse_diff(diff_str)
-
-      patches.each do |patch|
-        filename_line = ''
-        patch.lines.each do |line|
-          if line.start_with?('+++ b/')
-            filename_line = line
-            break
-          end
-        end
-
-        next if filename_line.empty?
-
-        file_name = filename_line.split('+++ b/').last.chomp
-
-        unless file_name.end_with?(*file_extensions)
-          next
-        end
-
-        if ignore_file_patterns.any? { |regex| regex.match(file_name) }
-          next
-        end
-
-        line_cursor = -1
-
-        changed_line_numbers = []
-        starting_line_no = 0
-
-        patch.each_line do |line|
-          # get hunk lines
-          if line.start_with?('@@ ')
-            line_numbers_str = line.split('@@ ')[1].split(' @@')[0]
-
-            starting_line_no = line_numbers_str.split('+')[1].split(',')[0]
-
-            # set cursor to 0 to be aware of the real diff file content lines has started
-            line_cursor = 0
-            next
-          end
-
-          unless line_cursor == -1
-            if line.start_with?('+')
-              changed_line_no = starting_line_no.to_i + line_cursor.to_i
-              changed_line_numbers.push(changed_line_no)
-            end
-            unless line.start_with?('-')
-              line_cursor += 1
-            end
-          end
-        end
-
-        changes[file_name] = changed_line_numbers unless changed_line_numbers.empty?
-      end
-
-      changes
-    end
-
-    def parse_diff(diff)
-      diff.encode!('UTF-8', 'UTF-8', :invalid => :replace)
-      patches = if danger.scm_provider == :gitlab
-                  diff.split("\n---")
-                else
-                  diff.split("\ndiff --git")
-                end
-      patches
-    end
-
     def generate_patch(title, content)
       markup_patch = '#### ' + title + "\n"
       markup_patch += "```diff \n" + content + "\n``` \n"
@@ -158,22 +75,10 @@ module Danger
 
       offending_files = []
       patches = []
-      if validator.include? "clang-format"
-        # clang-format
-        changed_lines_option = "-lines=%s:%s"
-      else
-        # YAPF
-        changed_lines_option = "--lines=%s-%s"
-      end
-      changes.each do |file_name, changed_lines|
-        changed_lines_command_array = []
 
-        changed_lines.each do |line_number|
-          changed_lines_command_array.push(changed_lines_option % [line_number.to_s, line_number.to_s])
-        end
-
-        changed_lines_command = changed_lines_command_array.join(' ')
-        format_command_array = [validator, changed_lines_command, file_name]
+      changes.grep(/\.m|\.mm/).each do |file_name|
+        format_command_array = [validator, file_name]
+        #message(format_command_array.join(' '))
 
         # validator command for formatting JUST changed lines
         formatted = `#{format_command_array.join(' ')}`
